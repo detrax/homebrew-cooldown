@@ -3,11 +3,12 @@
 `homebrew-cooldown` is a small standalone [`brew_outdated_cooldown.py`](brew_outdated_cooldown.py) script for people who
 want to wait a few days before upgrading newly released Homebrew packages.
 
-It shows the age of outdated formulae and casks, then proposes a `brew upgrade ...` command only for top-level packages
-whose own age and transitive runtime dependencies are old enough. The default cooldown is 7 days. The script never
-executes upgrades for you.
+This can help reduce stability issues and supply chain attacks. Keep Homebrew's convenience without pulling in very
+fresh releases the moment they land.
 
-This is useful if you want Homebrew's convenience without pulling in very fresh releases the moment they land.
+The script shows the age of outdated formulae and casks, then proposes a `brew upgrade ...` command only for top-level
+packages whose own age and transitive runtime dependencies are old enough. The default cooldown is 7 days. The script
+never executes upgrades for you.
 
 ## Quick Start
 
@@ -45,7 +46,7 @@ This script adds a cooldown filter similar in spirit to:
 The goal is simple: keep using `brew outdated` and `brew upgrade`, but make it easier to defer upgrades that still sit
 too close to a new release or a newly changed dependency chain.
 
-Ideally, `brew` would grow a feature like this. Until then, this script is a small workaround.
+Ideally, `brew` would grow a feature like this. Until then, this script can serve as a proof of concept.
 
 ## Example
 
