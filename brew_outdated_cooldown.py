@@ -266,14 +266,30 @@ def _run_brew(brew: str, args: list[str]) -> str:
     while stdout is returned for parsing.
     """
 
-    env = os.environ.copy()
-    env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
-    proc = subprocess.run([brew, *args], capture_output=True, text=True, env=env)
+    proc = subprocess.run(
+        [brew, *args],
+        capture_output=True,
+        text=True,
+        env=_brew_env(),
+    )
     if proc.stderr:
         sys.stderr.write(proc.stderr)
     if proc.returncode != 0:
         raise SystemExit(proc.returncode)
     return proc.stdout
+
+
+def _brew_env() -> dict[str, str]:
+    """Return the environment used for Homebrew read-only metadata queries.
+
+    Assumes this script should never trigger an implicit `brew update` while
+    inspecting local metadata. Centralizing the environment avoids helper drift
+    and keeps every Homebrew subprocess consistently read-only.
+    """
+
+    env = os.environ.copy()
+    env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+    return env
 
 
 def _load_outdated_info(
@@ -684,7 +700,12 @@ def _tap_repo_path(tap: str) -> str | None:
     brew = shutil.which("brew")
     if brew is None:
         return None
-    proc = subprocess.run([brew, "--repo", tap], capture_output=True, text=True)
+    proc = subprocess.run(
+        [brew, "--repo", tap],
+        capture_output=True,
+        text=True,
+        env=_brew_env(),
+    )
     if proc.returncode != 0:
         return None
     path = proc.stdout.strip()
