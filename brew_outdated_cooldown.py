@@ -740,6 +740,7 @@ def _tap_file_release_timestamp(info: dict[str, Any]) -> datetime | None:
     proc = subprocess.run(
         [
             git,
+            "--no-optional-locks",
             "-C",
             repo_path,
             "log",
