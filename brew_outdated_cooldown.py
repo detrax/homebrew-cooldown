@@ -25,21 +25,23 @@ More precisely, package age is determined by the most recent git commit touching
 that timestamp cannot be determined, the age is reported as unknown.
 
 Output section `Proposed upgrade command for leaf formulae and casks (not executed)`:
-- Lists the subset of `brew outdated` formulae that are either in `brew leaves` or casks.
+- Lists the subset of `brew outdated` formulae that are either in `brew leaves` or installed leaf casks.
+- A leaf formula is an installed formula that no other installed formula or cask depends on.
+- A leaf cask is an installed cask that no other installed cask depends on.
 - Except an item is included only if:
 1. the formula age is known and is at least `--min-age-days` (which is an integer that defaults to 7, 0 is also valid);
-2. every transitive runtime dependency age is known; and
-3. if transitive runtime dependencies exist, the newest dependency age is also at least `--min-age-days`.
-If a formula has no transitive runtime dependencies, or a cask has no Homebrew formula dependencies, only its own age is
+2. every transitive Homebrew dependency age is known; and
+3. if transitive Homebrew dependencies exist, the newest dependency age is also at least `--min-age-days`.
+If a formula has no transitive runtime dependencies, or a cask has no Homebrew cask or formula dependencies, only its own age is
 checked.
 
 Output sections `Leaf and non-leaf packages` and `Leaf formulae and casks`:
 - Output section `Leaf and non-leaf packages`: lists every outdated entry reported by `brew outdated`.
 - Output section `Leaf formulae and casks`: lists the subset of `brew outdated`
-  formulae that are either in `brew leaves` or casks.
+  formulae that are either in `brew leaves` or installed leaf casks.
 - Each package line starts with Homebrew's verbose outdated line when available, otherwise a synthesized verbose-style line,
   and then shows the package age, for example `11 days ago`, or `unknown age` if the tap timestamp cannot be determined.
-- If the newest transitive runtime dependency is newer than the package itself, the line also shows
+- If the newest transitive Homebrew dependency is newer than the package itself, the line also shows
   `dependency-name X days ago`.
 - The reported number of days is a rounded down integer, for example 23h ago prints '0 days ago', 24h ago prints '1 day ago'.
 
@@ -97,10 +99,9 @@ def main() -> int:
     outdated = _run_brew_json(brew, ["outdated", "--json=v2"])
     verbose_output = _run_brew(brew, ["outdated", "--verbose"]).strip()
     leaves_output = _run_brew(brew, ["leaves"])
-    leaf_tokens = frozenset(
+    leaf_formula_tokens = frozenset(
         line.strip() for line in leaves_output.splitlines() if line.strip()
     )
-    selected_tokens = _preferred_upgrade_tokens(outdated, leaf_tokens)
 
     lines = (
         verbose_output.splitlines()
@@ -111,6 +112,12 @@ def main() -> int:
         return 0
 
     info_by_token = _load_outdated_info(brew, outdated)
+    leaf_cask_tokens = _leaf_cask_tokens(info_by_token)
+    selected_tokens = _preferred_upgrade_tokens(
+        outdated,
+        leaf_formula_tokens=leaf_formula_tokens,
+        leaf_cask_tokens=leaf_cask_tokens,
+    )
     age_by_token = _build_age_by_token(outdated, info_by_token)
     rendered_lines = _rendered_report_lines(lines, age_by_token)
     upgrade_candidates: list[str] = []
@@ -202,18 +209,20 @@ def _parse_nonnegative_int(value: str) -> int:
 
 
 def _preferred_upgrade_tokens(
-    outdated: dict[str, Any], leaf_tokens: frozenset[str]
+    outdated: dict[str, Any],
+    leaf_formula_tokens: frozenset[str],
+    leaf_cask_tokens: frozenset[str],
 ) -> frozenset[str]:
     """Return the filtered set shown in the second section and upgrade proposal.
 
-    Assumes leaf formulae and outdated casks are the user-facing top-level items worth proposing. The union keeps formula
-    leaf selection while ensuring casks are treated as first-class entries even though `brew leaves` reports only formulae.
+    Assumes formula leaves come from `brew leaves`, while cask leaves are derived from the installed cask dependency
+    closure. Only outdated installed leaf casks are eligible top-level cask proposals.
     """
 
-    tokens = set(leaf_tokens)
+    tokens = set(leaf_formula_tokens)
     for entry in outdated.get("casks", []):
         token = entry.get("name") or entry.get("token")
-        if isinstance(token, str) and token:
+        if isinstance(token, str) and token in leaf_cask_tokens:
             tokens.add(token)
     return frozenset(tokens)
 
@@ -297,8 +306,9 @@ def _load_outdated_info(
 ) -> dict[str, dict[str, Any]]:
     """Load detailed Homebrew metadata for outdated roots and their runtime dependencies.
 
-    Assumes `installed[*].runtime_dependencies` is a flattened transitive graph. The helper expands the initial outdated
-    roots to the dependency closure so later age resolution can inspect every installed runtime dependency.
+    Assumes formula payloads expose runtime formula dependencies while installed casks expose direct cask and formula
+    prerequisites. The helper expands the initial outdated roots and installed casks to the dependency closure so later
+    age resolution and leaf-cask selection can inspect every referenced Homebrew package.
     """
 
     info_by_token: dict[str, dict[str, Any]] = {}
@@ -309,23 +319,27 @@ def _load_outdated_info(
         for entry in formula_info.get("formulae", []):
             info_by_token[entry["name"]] = entry
 
-    cask_tokens = [
-        entry.get("name") or entry.get("token") for entry in outdated.get("casks", [])
-    ]
-    cask_tokens = [token for token in cask_tokens if token]
-    if cask_tokens:
-        cask_info = _run_brew_json(brew, ["info", "--json=v2", "--cask", *cask_tokens])
-        for entry in cask_info.get("casks", []):
-            info_by_token[entry["token"]] = entry
+    installed_cask_info = _run_brew_json(brew, ["info", "--json=v2", "--installed", "--cask"])
+    for entry in installed_cask_info.get("casks", []):
+        info_by_token[entry["token"]] = entry
 
-    pending_formula_tokens = _collect_missing_runtime_dependency_tokens(info_by_token)
-    while pending_formula_tokens:
-        dependency_info = _run_brew_json(
-            brew, ["info", "--json=v2", *pending_formula_tokens]
-        )
-        for entry in dependency_info.get("formulae", []):
-            info_by_token[entry["name"]] = entry
-        pending_formula_tokens = _collect_missing_runtime_dependency_tokens(
+    pending_formula_tokens, pending_cask_tokens = _collect_missing_runtime_dependency_tokens(
+        info_by_token
+    )
+    while pending_formula_tokens or pending_cask_tokens:
+        if pending_formula_tokens:
+            dependency_info = _run_brew_json(
+                brew, ["info", "--json=v2", *pending_formula_tokens]
+            )
+            for entry in dependency_info.get("formulae", []):
+                info_by_token[entry["name"]] = entry
+        if pending_cask_tokens:
+            dependency_info = _run_brew_json(
+                brew, ["info", "--json=v2", "--cask", *pending_cask_tokens]
+            )
+            for entry in dependency_info.get("casks", []):
+                info_by_token[entry["token"]] = entry
+        pending_formula_tokens, pending_cask_tokens = _collect_missing_runtime_dependency_tokens(
             info_by_token
         )
 
@@ -542,8 +556,8 @@ def _newest_runtime_dependency_status(
     """Return dependency-age metadata for one package's Homebrew dependency graph.
 
     Assumes `info_by_token` contains the currently known Homebrew metadata closure for the outdated roots. Walking that
-    closure lets casks inherit the transitive runtime dependencies of their direct formula prerequisites. Missing dependency
-    ages are treated as unknown so proposal gating can fail closed.
+    closure lets casks inherit the transitive dependencies of their direct cask and formula prerequisites. Missing
+    dependency ages are treated as unknown so proposal gating can fail closed.
     """
 
     dependency_tokens = _transitive_runtime_dependency_tokens(token, info_by_token)
@@ -595,19 +609,19 @@ def _runtime_dependency_tokens(info: dict[str, Any]) -> tuple[str, ...]:
     """Return dependency tokens exposed directly by a Homebrew package payload.
 
     Assumes formulae record a flattened runtime graph under `installed[*].runtime_dependencies`, while casks may expose
-    direct Homebrew formula dependencies under `depends_on.formula`. This helper returns the package-local dependency edges;
-    callers that need a closure can expand them separately.
+    direct Homebrew formula and cask dependencies under `depends_on`. This helper returns the package-local dependency
+    edges; callers that need a closure can expand them separately.
     """
 
     installed = info.get("installed")
     if not isinstance(installed, list) or len(installed) == 0:
-        return _cask_formula_dependency_tokens(info)
+        return _cask_dependency_tokens(info)
     latest_install = installed[0]
     if not isinstance(latest_install, dict):
-        return _cask_formula_dependency_tokens(info)
+        return _cask_dependency_tokens(info)
     runtime_dependencies = latest_install.get("runtime_dependencies")
     if not isinstance(runtime_dependencies, list):
-        return _cask_formula_dependency_tokens(info)
+        return _cask_dependency_tokens(info)
 
     tokens: list[str] = []
     for dependency in runtime_dependencies:
@@ -617,7 +631,7 @@ def _runtime_dependency_tokens(info: dict[str, Any]) -> tuple[str, ...]:
         if isinstance(full_name, str) and full_name:
             tokens.append(full_name)
     if len(tokens) == 0:
-        return _cask_formula_dependency_tokens(info)
+        return _cask_dependency_tokens(info)
     return tuple(tokens)
 
 
@@ -627,9 +641,9 @@ def _transitive_runtime_dependency_tokens(
 ) -> tuple[str, ...]:
     """Return the transitive Homebrew dependency closure for one package.
 
-    Assumes formula payloads may already expose a flattened runtime graph, while casks may start from direct formula
-    prerequisites only. Expanding the closure through `info_by_token` makes dependency-age gating consistent across both
-    package kinds.
+    Assumes formula payloads may already expose a flattened runtime graph, while casks may start from direct cask and
+    formula prerequisites only. Expanding the closure through `info_by_token` makes dependency-age gating and leaf-cask
+    selection consistent across both package kinds.
     """
 
     root_info = info_by_token.get(token, {})
@@ -651,42 +665,114 @@ def _transitive_runtime_dependency_tokens(
     return tuple(ordered_tokens)
 
 
-def _cask_formula_dependency_tokens(info: dict[str, Any]) -> tuple[str, ...]:
-    """Return direct Homebrew formula dependencies declared by a cask.
+def _cask_dependency_tokens(info: dict[str, Any]) -> tuple[str, ...]:
+    """Return direct Homebrew cask and formula dependencies declared by a cask.
 
-    Assumes casks may list formula prerequisites under `depends_on.formula`. Extracting those edges lets the caller reuse the
-    formula runtime-dependency closure for cask upgrade gating.
+    Assumes casks may list direct prerequisites under `depends_on.cask` and `depends_on.formula`. Returning both kinds
+    lets the caller treat casks as first-class nodes in the dependency closure.
     """
 
     depends_on = info.get("depends_on")
     if not isinstance(depends_on, dict):
         return ()
-    formula_dependencies = depends_on.get("formula")
-    if isinstance(formula_dependencies, str) and formula_dependencies:
-        return (formula_dependencies,)
-    if not isinstance(formula_dependencies, list):
-        return ()
-    tokens = [
-        token for token in formula_dependencies if isinstance(token, str) and token
-    ]
+    tokens: list[str] = []
+    for dependency_key in ("cask", "formula"):
+        dependencies = depends_on.get(dependency_key)
+        if isinstance(dependencies, str) and dependencies:
+            tokens.append(dependencies)
+            continue
+        if not isinstance(dependencies, list):
+            continue
+        tokens.extend(
+            token for token in dependencies if isinstance(token, str) and token
+        )
     return tuple(tokens)
 
 
 def _collect_missing_runtime_dependency_tokens(
     info_by_token: dict[str, dict[str, Any]],
-) -> list[str]:
-    """Return runtime dependency tokens that still need Homebrew info metadata.
+) -> tuple[list[str], list[str]]:
+    """Return dependency tokens that still need Homebrew info metadata.
 
-    Assumes the current `info_by_token` map may already contain a subset of the flattened dependency graph. Returning only
-    missing tokens avoids repeated `brew info` requests while walking the closure.
+    Assumes the current `info_by_token` map may already contain a subset of the dependency graph. Separating formula and
+    cask tokens keeps follow-up `brew info` calls typed correctly while avoiding repeated metadata requests.
     """
 
-    missing_tokens: set[str] = set()
-    for info in info_by_token.values():
+    missing_formula_tokens: set[str] = set()
+    missing_cask_tokens: set[str] = set()
+    for token, info in info_by_token.items():
+        if _is_cask_info(info):
+            depends_on = info.get("depends_on")
+            if not isinstance(depends_on, dict):
+                continue
+            for dependency_token in _dependency_value_tokens(depends_on.get("formula")):
+                if dependency_token not in info_by_token:
+                    missing_formula_tokens.add(dependency_token)
+            for dependency_token in _dependency_value_tokens(depends_on.get("cask")):
+                if dependency_token not in info_by_token:
+                    missing_cask_tokens.add(dependency_token)
+            continue
         for dependency_token in _runtime_dependency_tokens(info):
             if dependency_token not in info_by_token:
-                missing_tokens.add(dependency_token)
-    return sorted(missing_tokens)
+                missing_formula_tokens.add(dependency_token)
+    return sorted(missing_formula_tokens), sorted(missing_cask_tokens)
+
+
+def _dependency_value_tokens(value: Any) -> tuple[str, ...]:
+    """Return dependency tokens from one Homebrew `depends_on` value.
+
+    Assumes dependency values are either a token string or a list of token strings. Filtering here keeps cask dependency
+    collection strict and reusable.
+    """
+
+    if isinstance(value, str) and value:
+        return (value,)
+    if not isinstance(value, list):
+        return ()
+    return tuple(token for token in value if isinstance(token, str) and token)
+
+
+def _is_cask_info(info: dict[str, Any]) -> bool:
+    """Return True when a metadata payload describes a Homebrew cask.
+
+    Assumes cask payloads always include a `token`, while formula payloads use `name`. Using the payload shape avoids
+    external type tags when traversing mixed dependency graphs.
+    """
+
+    token = info.get("token")
+    return isinstance(token, str) and bool(token)
+
+
+def _is_installed_cask_info(info: dict[str, Any]) -> bool:
+    """Return True when a cask metadata payload represents an installed cask.
+
+    Assumes `brew info --json=v2 --installed --cask` records the installed version string in `installed`, while
+    non-installed casks report `null`. This lets leaf-cask selection stay scoped to installed casks only.
+    """
+
+    if not _is_cask_info(info):
+        return False
+    installed = info.get("installed")
+    return isinstance(installed, str) and bool(installed)
+
+
+def _leaf_cask_tokens(info_by_token: dict[str, dict[str, Any]]) -> frozenset[str]:
+    """Return installed casks that no other installed cask depends on transitively.
+
+    Assumes every installed cask closure can be expanded from direct cask and formula edges in `info_by_token`.
+    Deriving leaves from those closures avoids a separate reverse-graph traversal while keeping the cask proposal set
+    conservative.
+    """
+
+    installed_cask_tokens = {
+        token for token, info in info_by_token.items() if _is_installed_cask_info(info)
+    }
+    non_leaf_cask_tokens: set[str] = set()
+    for token in installed_cask_tokens:
+        for dependency_token in _transitive_runtime_dependency_tokens(token, info_by_token):
+            if dependency_token in installed_cask_tokens:
+                non_leaf_cask_tokens.add(dependency_token)
+    return frozenset(installed_cask_tokens - non_leaf_cask_tokens)
 
 
 @cache

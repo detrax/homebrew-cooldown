@@ -6,9 +6,10 @@ want to wait a few days before upgrading newly released Homebrew packages.
 This can help reduce stability issues and supply chain attacks. Keep Homebrew's convenience without pulling in very
 fresh releases the moment they land.
 
-The script shows the age of outdated formulae and casks, then proposes a `brew upgrade ...` command only for top-level
-packages whose own age and transitive runtime dependencies are old enough. The default cooldown is 7 days. The script
-never executes upgrades for you.
+The script shows the age of outdated formulae and casks, then proposes a `brew upgrade ...` command only for leaf
+formulae and leaf casks whose own age and transitive Homebrew dependencies are old enough. Leaf formulae are installed
+formulae that no other installed formula or cask depends on. Leaf casks are installed casks that no other installed cask
+depends on. The default cooldown is 7 days. The script never executes upgrades for you.
 
 ## Quick Start
 
@@ -72,8 +73,8 @@ node (25.8.2) < 25.9.0_1 (8 days ago, sqlite 0 days ago)
 
 - `pkg (old) < new (12 days ago)` means the local Homebrew definition for that upgrade target last changed 12 full days
   ago.
-- `pkg ... (10 days ago, dep 1 day ago)` means the package itself is older, but its newest transitive runtime dependency
-  is only 1 day old.
+- `pkg ... (10 days ago, dep 1 day ago)` means the package itself is older, but its newest transitive Homebrew
+  dependency is only 1 day old.
 - `unknown age` means the tap git history could not be resolved for that entry. Unknown ages are excluded from the
   proposed upgrade command.
 
@@ -84,14 +85,14 @@ node (25.8.2) < 25.9.0_1 (8 days ago, sqlite 0 days ago)
    `brew leaves`, and `brew info --json=v2`.
 3. For each outdated formula or cask, it estimates package age from the latest git commit that touched the local
    Homebrew tap definition file.
-4. For leaf formulae and casks, it proposes upgrades only when:
+4. For leaf formulae and installed leaf casks, it proposes upgrades only when:
    - the package age is known;
    - the package age is at least `--min-age-days`;
-   - every transitive runtime dependency age is known; and
-   - the newest transitive runtime dependency is also at least `--min-age-days`.
+   - every transitive Homebrew dependency age is known; and
+   - the newest transitive Homebrew dependency is also at least `--min-age-days`.
 5. It prints three sections:
    - all outdated packages;
-   - the leaf formulae and casks subset; and
+   - the leaf formulae and installed leaf casks subset; and
    - a non-executed proposed `brew upgrade ...` command.
 
 If a relevant age cannot be determined, that package is not proposed for upgrade.
