@@ -10,6 +10,8 @@ The script shows the age of outdated formulae and casks, then proposes a `brew u
 formulae and leaf casks whose own age and transitive Homebrew dependencies are old enough. Leaf formulae are installed
 formulae that no other installed formula or cask depends on. Leaf casks are installed casks that no other installed cask
 depends on. The default cooldown is 7 days. The script never executes upgrades for you.
+For formulae, dependency checks include required dependencies of the current upgrade candidate, including packages that
+Homebrew would newly install.
 
 ## Quick Start
 

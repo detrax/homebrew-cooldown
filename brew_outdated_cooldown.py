@@ -34,6 +34,8 @@ Output section `Proposed upgrade command for leaf formulae and casks (not execut
 3. if transitive Homebrew dependencies exist, the newest dependency age is also at least `--min-age-days`.
 If a formula has no transitive runtime dependencies, or a cask has no Homebrew cask or formula dependencies, only its own age is
 checked.
+For formulae, dependency checks include the current candidate formula's required dependencies, including dependencies that
+Homebrew would newly install during `brew upgrade`.
 
 Output sections `Leaf and non-leaf packages` and `Leaf formulae and casks`:
 - Output section `Leaf and non-leaf packages`: lists every outdated entry reported by `brew outdated`.
@@ -608,31 +610,46 @@ def _newest_runtime_dependency_status(
 def _runtime_dependency_tokens(info: dict[str, Any]) -> tuple[str, ...]:
     """Return dependency tokens exposed directly by a Homebrew package payload.
 
-    Assumes formulae record a flattened runtime graph under `installed[*].runtime_dependencies`, while casks may expose
-    direct Homebrew formula and cask dependencies under `depends_on`. This helper returns the package-local dependency
-    edges; callers that need a closure can expand them separately.
+    Assumes formula `dependencies` describe the upgrade candidate, while installed runtime metadata describes the current
+    install. Merging both keeps upgrade gating conservative when a new formula version adds required dependencies.
     """
 
-    installed = info.get("installed")
-    if not isinstance(installed, list) or len(installed) == 0:
-        return _cask_dependency_tokens(info)
-    latest_install = installed[0]
-    if not isinstance(latest_install, dict):
-        return _cask_dependency_tokens(info)
-    runtime_dependencies = latest_install.get("runtime_dependencies")
-    if not isinstance(runtime_dependencies, list):
+    if _is_cask_info(info):
         return _cask_dependency_tokens(info)
 
-    tokens: list[str] = []
+    tokens = list(_declared_formula_dependency_tokens(info))
+    seen = set(tokens)
+    installed = info.get("installed")
+    if not isinstance(installed, list) or len(installed) == 0:
+        return tuple(tokens)
+
+    latest_install = installed[0]
+    if not isinstance(latest_install, dict):
+        return tuple(tokens)
+    runtime_dependencies = latest_install.get("runtime_dependencies")
+    if not isinstance(runtime_dependencies, list):
+        return tuple(tokens)
     for dependency in runtime_dependencies:
         if not isinstance(dependency, dict):
             continue
         full_name = dependency.get("full_name")
-        if isinstance(full_name, str) and full_name:
+        if isinstance(full_name, str) and full_name and full_name not in seen:
             tokens.append(full_name)
-    if len(tokens) == 0:
-        return _cask_dependency_tokens(info)
+            seen.add(full_name)
     return tuple(tokens)
+
+
+def _declared_formula_dependency_tokens(info: dict[str, Any]) -> tuple[str, ...]:
+    """Return direct required dependencies from current formula metadata.
+
+    Assumes Homebrew's JSON `dependencies` field excludes build-only and test-only dependencies. These tokens describe
+    the candidate formula after `brew update`, including dependencies that are not installed yet.
+    """
+
+    dependencies = info.get("dependencies")
+    if not isinstance(dependencies, list):
+        return ()
+    return tuple(token for token in dependencies if isinstance(token, str) and token)
 
 
 def _transitive_runtime_dependency_tokens(
@@ -641,9 +658,8 @@ def _transitive_runtime_dependency_tokens(
 ) -> tuple[str, ...]:
     """Return the transitive Homebrew dependency closure for one package.
 
-    Assumes formula payloads may already expose a flattened runtime graph, while casks may start from direct cask and
-    formula prerequisites only. Expanding the closure through `info_by_token` makes dependency-age gating and leaf-cask
-    selection consistent across both package kinds.
+    Assumes formula payloads may mix candidate direct dependencies with installed runtime dependencies. Expanding through
+    `info_by_token` includes not-yet-installed dependencies before proposing an upgrade.
     """
 
     root_info = info_by_token.get(token, {})
