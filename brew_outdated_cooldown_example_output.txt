@@ -59,4 +59,4 @@ rocksdb (10.10.1) < 11.0.4 (3 days ago)
 rust (1.94.0) < 1.94.1 (12 days ago, openssl@3 3 days ago)
 uv (0.11.2) < 0.11.6 (2 days ago)
 
-Proposed upgrade command for leaf formulae and casks (not executed): brew upgrade b3sum parallel
+Proposed upgrade command for leaf formulae and casks (not executed): brew upgrade --dry-run b3sum parallel

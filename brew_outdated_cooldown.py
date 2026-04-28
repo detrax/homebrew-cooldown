@@ -60,7 +60,7 @@ iterm2 (3.5.0) != 3.5.1 (9 days ago)
 ocrmypdf (17.4.0) < 17.4.0_1 (11 days ago, harfbuzz 1 day ago)
 uv (0.11.2) < 0.11.3 (7 days ago)
 
-Proposed upgrade command for leaf formulae and casks (not executed): brew upgrade iterm2 uv
+Proposed upgrade command for leaf formulae and casks (not executed): brew upgrade --dry-run iterm2 uv
 """
 
 from __future__ import annotations
@@ -147,7 +147,7 @@ def main() -> int:
     if upgrade_candidates:
         quoted = " ".join(shlex.quote(token) for token in upgrade_candidates)
         print(
-            f"Proposed upgrade command for leaf formulae and casks (not executed): brew upgrade {quoted}"
+            f"Proposed upgrade command for leaf formulae and casks (not executed): brew upgrade --dry-run {quoted}"
         )
     else:
         print(
