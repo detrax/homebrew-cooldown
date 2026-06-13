@@ -1,5 +1,9 @@
 # homebrew-cooldown
 
+> **Fork note (detrax):** This fork adds a `pyproject.toml` (so the script is `pipx`-installable as `brew-cooldown`)
+> and an optional `--check-bugs` flag that scans GitHub for recent issues mentioning each upgrade candidate's incoming
+> version and drops affected candidates from the proposed upgrade command. Upstream: [whoschek/homebrew-cooldown](https://github.com/whoschek/homebrew-cooldown).
+
 `homebrew-cooldown` is a small standalone [`brew_outdated_cooldown.py`](brew_outdated_cooldown.py) script for people who
 want to wait a few days before upgrading newly released Homebrew packages.
 
@@ -32,6 +36,43 @@ To use a different cooldown window:
 
 ```bash
 ./brew_outdated_cooldown.py --min-age-days=14
+```
+
+### Install as `brew-cooldown` (this fork)
+
+```bash
+pipx install git+https://github.com/detrax/homebrew-cooldown
+brew update
+brew-cooldown --min-age-days=7 --check-bugs
+```
+
+### `--check-bugs` (this fork)
+
+After cooldown gating, query GitHub for issues created within `--bug-window-days` (default 14) that mention each
+candidate's incoming version. Hits drop the candidate from the proposed upgrade command and print the offending
+issue URLs.
+
+Two queries per candidate (when data is available):
+
+1. **Upstream repo** — derived from `info.homepage` when it points at `github.com`; filtered by an OR-keyword list
+   (`--bug-keywords`, default: `regression,broken,crash,segfault,panic,hang,fails,error,bug`).
+2. **Homebrew tap repo** — `homebrew/core` → `Homebrew/homebrew-core` etc.; filtered by the version string only
+   (tap issues are typically already curated for actionable regressions, so keyword filtering would be too strict).
+
+Requires `gh` in `PATH` and authenticated (`gh auth login`). Fails soft: missing `gh`, rate limits, or network errors
+print a warning and skip the bug check rather than aborting.
+
+Example:
+
+```bash
+brew-cooldown --min-age-days=7 --check-bugs --bug-window-days=14
+```
+
+```
+Recent GitHub issues in last 14 days (dropping affected packages from upgrade proposal):
+  gh:
+    [upstream] cli/cli#13638 (2026-06-12) gh release list returns: unexpected EOF
+      https://github.com/cli/cli/issues/13638
 ```
 
 ## Why

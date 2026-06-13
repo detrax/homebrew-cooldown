@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "homebrew-cooldown"
+version = "0.2.0"
+description = "Delay Homebrew upgrades until packages have aged enough; optionally drop candidates with fresh upstream bug reports."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+authors = [
+    { name = "Wolfgang Hoschek" },
+]
+maintainers = [
+    { name = "Martin T. Heintze", email = "martin@mthse.de" },
+]
+keywords = ["homebrew", "brew", "cooldown", "supply-chain", "macos"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Software Distribution",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+brew-cooldown = "brew_outdated_cooldown:main"
+
+[project.urls]
+Homepage = "https://github.com/whoschek/homebrew-cooldown"
+"Fork (detrax)" = "https://github.com/detrax/homebrew-cooldown"
+Issues = "https://github.com/whoschek/homebrew-cooldown/issues"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["brew_outdated_cooldown.py"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"

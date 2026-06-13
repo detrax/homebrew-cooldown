@@ -73,9 +73,10 @@ import subprocess
 import sys
 from concurrent.futures import as_completed
 from concurrent.futures.thread import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import cache
 from typing import Any, TypedDict, cast
+from urllib.parse import urlparse
 
 SOURCE_TAP_GIT = "TAP"
 
@@ -98,6 +99,9 @@ def main() -> int:
 
     cli_args = _parse_cli_args(sys.argv[1:])
     min_age_days = cli_args["min_age_days"]
+    check_bugs = cli_args["check_bugs"]
+    bug_window_days = cli_args["bug_window_days"]
+    bug_keywords = cli_args["bug_keywords"]
     outdated = _run_brew_json(brew, ["outdated", "--json=v2"])
     verbose_output = _run_brew(brew, ["outdated", "--verbose"]).strip()
     leaves_output = _run_brew(brew, ["leaves"])
@@ -143,6 +147,35 @@ def main() -> int:
         if token in selected_tokens:
             print(line)
 
+    bug_hits: dict[str, list[BugHit]] = {}
+    if check_bugs and upgrade_candidates:
+        bug_hits = _check_recent_bugs(
+            upgrade_candidates,
+            info_by_token,
+            outdated,
+            window_days=bug_window_days,
+            keywords=bug_keywords,
+        )
+        if bug_hits:
+            print()
+            print(
+                f"Recent GitHub issues in last {bug_window_days} days "
+                f"(dropping affected packages from upgrade proposal):"
+            )
+            for token, hits in bug_hits.items():
+                print(f"  {token}:")
+                for hit in hits:
+                    title = hit["title"][:90]
+                    print(
+                        f"    [{hit['source']}] {hit['repo']}#{hit['number']} "
+                        f"({hit['created_at'][:10]}) {title}"
+                    )
+                    if hit["url"]:
+                        print(f"      {hit['url']}")
+            upgrade_candidates = [
+                token for token in upgrade_candidates if token not in bug_hits
+            ]
+
     print()
     if upgrade_candidates:
         quoted = " ".join(shlex.quote(token) for token in upgrade_candidates)
@@ -150,9 +183,13 @@ def main() -> int:
             f"Proposed upgrade command for leaf formulae and casks (not executed): brew upgrade --dry-run {quoted}"
         )
     else:
+        reason = (
+            "no packages satisfy --min-age-days and --check-bugs filters"
+            if check_bugs
+            else f"no packages satisfy --min-age-days={min_age_days}"
+        )
         print(
-            f"Proposed upgrade command for leaf formulae and casks (not executed): "
-            f"no packages satisfy --min-age-days={min_age_days}"
+            f"Proposed upgrade command for leaf formulae and casks (not executed): {reason}"
         )
     return 0
 
@@ -187,6 +224,9 @@ class AgeInfo(TypedDict):
 
 class ParsedCliArgs(TypedDict):
     min_age_days: int
+    check_bugs: bool
+    bug_window_days: int
+    bug_keywords: tuple[str, ...]
 
 
 def _parse_cli_args(args: list[str]) -> ParsedCliArgs:
@@ -197,9 +237,39 @@ def _parse_cli_args(args: list[str]) -> ParsedCliArgs:
         default=7,
         help="Minimum age in days required for proposed upgrades. Default: 7.",
     )
+    parser.add_argument(
+        "--check-bugs",
+        action="store_true",
+        help=(
+            "After cooldown gating, search GitHub for recent issues mentioning the "
+            "candidate version and drop candidates with hits. Requires `gh` in PATH."
+        ),
+    )
+    parser.add_argument(
+        "--bug-window-days",
+        type=_parse_nonnegative_int,
+        default=14,
+        help=(
+            "Window (days) for GitHub issue search when --check-bugs is set. Default: 14."
+        ),
+    )
+    parser.add_argument(
+        "--bug-keywords",
+        default="regression,broken,crash,segfault,panic,hang,fails,error,bug",
+        help=(
+            "Comma-separated keywords to OR into the upstream-repo issue query. "
+            "Empty string disables keyword filter (matches any recent issue mentioning the version)."
+        ),
+    )
     namespace = parser.parse_args(args)
+    keywords = tuple(
+        kw.strip() for kw in str(namespace.bug_keywords).split(",") if kw.strip()
+    )
     return {
         "min_age_days": namespace.min_age_days,
+        "check_bugs": bool(namespace.check_bugs),
+        "bug_window_days": namespace.bug_window_days,
+        "bug_keywords": keywords,
     }
 
 
@@ -911,6 +981,186 @@ def _extract_token(line: str) -> str:
     if " (" in stripped:
         return stripped.split(" (", 1)[0]
     return stripped.split(maxsplit=1)[0]
+
+
+class BugHit(TypedDict):
+    """One recent GitHub issue suspected of describing a regression in a candidate version."""
+
+    repo: str
+    number: int
+    title: str
+    url: str
+    created_at: str
+    source: str  # "upstream" | "tap"
+
+
+def _check_recent_bugs(
+    candidates: list[str],
+    info_by_token: dict[str, dict[str, Any]],
+    outdated: dict[str, Any],
+    window_days: int,
+    keywords: tuple[str, ...],
+) -> dict[str, list[BugHit]]:
+    """Search GitHub for recent issues mentioning each candidate's incoming version.
+
+    Returns a map from token to issue hits. Tokens with no hits do NOT appear in the map.
+    Fails closed when `gh` is unavailable: returns empty map and prints a warning.
+    """
+
+    gh = shutil.which("gh")
+    if gh is None:
+        print(
+            "warning: --check-bugs requires `gh` in PATH; skipping bug check",
+            file=sys.stderr,
+        )
+        return {}
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    version_by_token = _candidate_versions(outdated)
+    hits: dict[str, list[BugHit]] = {}
+
+    def _check_one(token: str) -> tuple[str, list[BugHit]]:
+        info = info_by_token.get(token, {})
+        version = version_by_token.get(token)
+        token_hits: list[BugHit] = []
+
+        upstream = _github_repo_from_homepage(info.get("homepage"))
+        if upstream and version:
+            kw_clause = (
+                " (" + " OR ".join(keywords) + ")" if keywords else ""
+            )
+            query = f'repo:{upstream} is:issue "{version}" created:>={cutoff}{kw_clause}'
+            for issue in _gh_search_issues(gh, query):
+                token_hits.append(
+                    {
+                        "repo": upstream,
+                        "number": int(issue.get("number") or 0),
+                        "title": str(issue.get("title") or "").strip(),
+                        "url": str(issue.get("html_url") or "").strip(),
+                        "created_at": str(issue.get("created_at") or "").strip(),
+                        "source": "upstream",
+                    }
+                )
+
+        tap_repo = _tap_to_github_repo(info.get("tap"))
+        if tap_repo and version:
+            tap_query = (
+                f'repo:{tap_repo} is:issue {token} "{version}" created:>={cutoff}'
+            )
+            for issue in _gh_search_issues(gh, tap_query):
+                token_hits.append(
+                    {
+                        "repo": tap_repo,
+                        "number": int(issue.get("number") or 0),
+                        "title": str(issue.get("title") or "").strip(),
+                        "url": str(issue.get("html_url") or "").strip(),
+                        "created_at": str(issue.get("created_at") or "").strip(),
+                        "source": "tap",
+                    }
+                )
+
+        return token, token_hits
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(candidates)))) as executor:
+        for future in as_completed(executor.submit(_check_one, t) for t in candidates):
+            try:
+                token, token_hits = future.result()
+            except Exception as exc:
+                print(f"warning: bug-check error: {exc}", file=sys.stderr)
+                continue
+            if token_hits:
+                hits[token] = token_hits
+
+    return hits
+
+
+def _candidate_versions(outdated: dict[str, Any]) -> dict[str, str]:
+    """Map each outdated token to its incoming candidate version string."""
+
+    versions: dict[str, str] = {}
+    for entry in outdated.get("formulae", []) or []:
+        token = entry.get("name")
+        version = entry.get("current_version")
+        if isinstance(token, str) and isinstance(version, str) and version:
+            versions[token] = version
+    for entry in outdated.get("casks", []) or []:
+        token = entry.get("name") or entry.get("token")
+        version = entry.get("current_version")
+        if isinstance(token, str) and isinstance(version, str) and version:
+            versions[token] = version
+    return versions
+
+
+def _github_repo_from_homepage(homepage: Any) -> str | None:
+    """Extract `owner/repo` from a github.com homepage URL, or None."""
+
+    if not isinstance(homepage, str) or not homepage:
+        return None
+    try:
+        parsed = urlparse(homepage)
+    except ValueError:
+        return None
+    if parsed.netloc.lower() not in ("github.com", "www.github.com"):
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    owner, repo = parts[0], parts[1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return f"{owner}/{repo}"
+
+
+def _tap_to_github_repo(tap: Any) -> str | None:
+    """Convert a Homebrew tap slug to its conventional GitHub repo, or None.
+
+    `homebrew/core` -> `Homebrew/homebrew-core`. Generic taps `<owner>/<repo>` map to
+    `<owner>/homebrew-<repo>`. Returns None for non-string or malformed inputs.
+    """
+
+    if not isinstance(tap, str) or "/" not in tap:
+        return None
+    owner, _, repo = tap.partition("/")
+    if not owner or not repo:
+        return None
+    if owner.lower() == "homebrew":
+        owner = "Homebrew"
+    return f"{owner}/homebrew-{repo}"
+
+
+def _gh_search_issues(gh: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Run a GitHub issue search via `gh api` and return up to `limit` items.
+
+    Fails soft: prints to stderr and returns [] on any error (rate limit, network, auth).
+    """
+
+    proc = subprocess.run(
+        [
+            gh,
+            "api",
+            "-X",
+            "GET",
+            "search/issues",
+            "-f",
+            f"q={query}",
+            "-f",
+            f"per_page={limit}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip() or "unknown gh error"
+        print(f"warning: gh search failed ({query!r}): {msg}", file=sys.stderr)
+        return []
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
 
 
 if __name__ == "__main__":
