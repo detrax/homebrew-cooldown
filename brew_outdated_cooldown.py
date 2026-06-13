@@ -257,9 +257,10 @@ def _parse_cli_args(args: list[str]) -> ParsedCliArgs:
     )
     parser.add_argument(
         "--bug-keywords",
-        default="regression,broken,crash,segfault,panic,hang,fails,error,bug",
+        default="regression,broken,crash,fails,bug",
         help=(
             "Comma-separated keywords to OR into the upstream-repo issue query. "
+            "GitHub allows at most 5 OR operators per search query, so keep this to ~6 keywords. "
             "Empty string disables keyword filter (matches any recent issue mentioning the version)."
         ),
     )
