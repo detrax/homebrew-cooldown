@@ -71,6 +71,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import as_completed
 from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -1126,15 +1127,16 @@ def _check_recent_bugs(
 
         return token, token_hits
 
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(candidates)))) as executor:
-        for future in as_completed(executor.submit(_check_one, t) for t in candidates):
-            try:
-                token, token_hits = future.result()
-            except Exception as exc:
-                print(f"warning: bug-check error: {exc}", file=sys.stderr)
-                continue
-            if token_hits:
-                hits[token] = token_hits
+    # GitHub Search API: 30 req/min for authenticated users. Run serially to stay under the cap;
+    # _gh_search_issues handles rate-limit retries internally.
+    for token in candidates:
+        try:
+            token, token_hits = _check_one(token)
+        except Exception as exc:
+            print(f"warning: bug-check error: {exc}", file=sys.stderr)
+            continue
+        if token_hits:
+            hits[token] = token_hits
 
     return hits
 
@@ -1219,29 +1221,46 @@ def _tap_to_github_repo(tap: Any) -> str | None:
     return f"{owner}/homebrew-{repo}"
 
 
-def _gh_search_issues(gh: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
+_GH_SEARCH_LAST_CALL: list[float] = [0.0]
+_GH_SEARCH_MIN_INTERVAL_S = 2.1  # 30 req/min cap = ≥2s spacing; small buffer.
+
+
+def _gh_search_throttle() -> None:
+    """Sleep just enough to keep the GitHub Search API under 30 req/min (auth)."""
+    now = time.monotonic()
+    elapsed = now - _GH_SEARCH_LAST_CALL[0]
+    if elapsed < _GH_SEARCH_MIN_INTERVAL_S:
+        time.sleep(_GH_SEARCH_MIN_INTERVAL_S - elapsed)
+    _GH_SEARCH_LAST_CALL[0] = time.monotonic()
+
+
+def _gh_search_issues(
+    gh: str, query: str, limit: int = 5, retry_on_rate_limit: bool = True
+) -> list[dict[str, Any]]:
     """Run a GitHub issue search via `gh api` and return up to `limit` items.
 
-    Fails soft: prints to stderr and returns [] on any error (rate limit, network, auth).
+    Fails soft: prints to stderr and returns [] on any error. On rate-limit (HTTP 403 with
+    "API rate limit exceeded"), sleeps until the Search-API window resets (~65s) and retries once.
     """
 
+    _gh_search_throttle()
     proc = subprocess.run(
         [
-            gh,
-            "api",
-            "-X",
-            "GET",
-            "search/issues",
-            "-f",
-            f"q={query}",
-            "-f",
-            f"per_page={limit}",
+            gh, "api", "-X", "GET", "search/issues",
+            "-f", f"q={query}",
+            "-f", f"per_page={limit}",
         ],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True,
     )
     if proc.returncode != 0:
         msg = proc.stderr.strip() or proc.stdout.strip() or "unknown gh error"
+        if retry_on_rate_limit and "rate limit exceeded" in msg.lower():
+            print(
+                f"info: GitHub Search rate limit hit; sleeping 65s then retrying once",
+                file=sys.stderr,
+            )
+            time.sleep(65)
+            return _gh_search_issues(gh, query, limit=limit, retry_on_rate_limit=False)
         print(f"warning: gh search failed ({query!r}): {msg}", file=sys.stderr)
         return []
     try:
