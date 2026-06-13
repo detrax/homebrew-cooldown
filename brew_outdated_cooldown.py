@@ -1089,7 +1089,7 @@ def _check_recent_bugs(
         version = version_by_token.get(token)
         token_hits: list[BugHit] = []
 
-        upstream = _github_repo_from_homepage(info.get("homepage"))
+        upstream = _github_repo_from_info(info)
         if upstream and version:
             kw_clause = (
                 " (" + " OR ".join(keywords) + ")" if keywords else ""
@@ -1157,7 +1157,7 @@ def _candidate_versions(outdated: dict[str, Any]) -> dict[str, str]:
 
 
 def _github_repo_from_homepage(homepage: Any) -> str | None:
-    """Extract `owner/repo` from a github.com homepage URL, or None."""
+    """Extract `owner/repo` from a github.com URL string, or None."""
 
     if not isinstance(homepage, str) or not homepage:
         return None
@@ -1174,6 +1174,32 @@ def _github_repo_from_homepage(homepage: Any) -> str | None:
     if repo.endswith(".git"):
         repo = repo[:-4]
     return f"{owner}/{repo}"
+
+
+def _github_repo_from_info(info: dict[str, Any]) -> str | None:
+    """Try multiple metadata fields to locate the upstream github.com repo.
+
+    Order: homepage, urls.stable.url, urls.head.url, then any github.com URL in
+    the formula source. Returns None when no candidate URL points at github.com.
+    """
+
+    candidates: list[str] = []
+    homepage = info.get("homepage")
+    if isinstance(homepage, str):
+        candidates.append(homepage)
+    urls = info.get("urls")
+    if isinstance(urls, dict):
+        for key in ("stable", "head"):
+            entry = urls.get(key)
+            if isinstance(entry, dict):
+                url = entry.get("url")
+                if isinstance(url, str):
+                    candidates.append(url)
+    for candidate in candidates:
+        repo = _github_repo_from_homepage(candidate)
+        if repo:
+            return repo
+    return None
 
 
 def _tap_to_github_repo(tap: Any) -> str | None:
