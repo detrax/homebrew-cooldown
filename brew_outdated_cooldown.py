@@ -79,6 +79,7 @@ from typing import Any, TypedDict, cast
 from urllib.parse import urlparse
 
 SOURCE_TAP_GIT = "TAP"
+SOURCE_TAP_GITHUB = "GH"
 
 MIN_PYTHON_VERSION = (3, 9)
 if sys.version_info < MIN_PYTHON_VERSION:
@@ -617,6 +618,9 @@ def _resolve_release_timestamp(info: dict[str, Any]) -> tuple[datetime | None, s
     tap_timestamp = _tap_file_release_timestamp(info)
     if tap_timestamp is not None:
         return tap_timestamp, SOURCE_TAP_GIT
+    gh_timestamp = _github_api_tap_release_timestamp(info)
+    if gh_timestamp is not None:
+        return gh_timestamp, SOURCE_TAP_GITHUB
     return None, None
 
 
@@ -932,6 +936,67 @@ def _tap_file_release_timestamp(info: dict[str, Any]) -> datetime | None:
         return None
     try:
         return _parse_iso8601(value)
+    except ValueError:
+        return None
+
+
+def _github_api_tap_release_timestamp(info: dict[str, Any]) -> datetime | None:
+    """Fallback when no local tap clone exists: ask GitHub for the latest commit on the formula file.
+
+    Avoids the ~1.5GB cost of cloning homebrew/core just to read git history. Requires `gh` in PATH and
+    a derivable GitHub repo from `info.tap`. Cached per (repo, path) for the run.
+    """
+
+    tap = info.get("tap")
+    ruby_source_path = info.get("ruby_source_path")
+    if (
+        not isinstance(tap, str) or not tap
+        or not isinstance(ruby_source_path, str) or not ruby_source_path
+    ):
+        return None
+    repo = _tap_to_github_repo(tap)
+    if repo is None:
+        return None
+    return _github_api_commit_timestamp(repo, ruby_source_path)
+
+
+@cache
+def _github_api_commit_timestamp(repo: str, path: str) -> datetime | None:
+    """Return the committer date of the most recent commit touching `path` in `repo`."""
+
+    gh = shutil.which("gh")
+    if gh is None:
+        return None
+    proc = subprocess.run(
+        [
+            gh, "api", "-X", "GET", f"repos/{repo}/commits",
+            "-f", f"path={path}",
+            "-f", "per_page=1",
+        ],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    item = payload[0]
+    if not isinstance(item, dict):
+        return None
+    commit = item.get("commit")
+    if not isinstance(commit, dict):
+        return None
+    committer = commit.get("committer")
+    if not isinstance(committer, dict):
+        return None
+    date_str = committer.get("date")
+    if not isinstance(date_str, str):
+        return None
+    try:
+        return _parse_iso8601(date_str)
     except ValueError:
         return None
 
