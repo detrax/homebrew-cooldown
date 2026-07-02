@@ -319,23 +319,39 @@ def _load_outdated_info(
     if formula_tokens:
         formula_info = _run_brew_json(brew, ["info", "--json=v2", *formula_tokens])
         for entry in formula_info.get("formulae", []):
-            info_by_token[entry["name"]] = entry
+            _index_formula_info(info_by_token, entry)
 
     installed_cask_info = _run_brew_json(brew, ["info", "--json=v2", "--installed", "--cask"])
     for entry in installed_cask_info.get("casks", []):
         info_by_token[entry["token"]] = entry
 
+    attempted_formula_tokens: set[str] = set()
+    attempted_cask_tokens: set[str] = set()
     pending_formula_tokens, pending_cask_tokens = _collect_missing_runtime_dependency_tokens(
         info_by_token
     )
     while pending_formula_tokens or pending_cask_tokens:
+        pending_formula_tokens = [
+            token
+            for token in pending_formula_tokens
+            if token not in attempted_formula_tokens
+        ]
+        pending_cask_tokens = [
+            token
+            for token in pending_cask_tokens
+            if token not in attempted_cask_tokens
+        ]
+        if not pending_formula_tokens and not pending_cask_tokens:
+            break
         if pending_formula_tokens:
+            attempted_formula_tokens.update(pending_formula_tokens)
             dependency_info = _run_brew_json(
                 brew, ["info", "--json=v2", *pending_formula_tokens]
             )
             for entry in dependency_info.get("formulae", []):
-                info_by_token[entry["name"]] = entry
+                _index_formula_info(info_by_token, entry)
         if pending_cask_tokens:
+            attempted_cask_tokens.update(pending_cask_tokens)
             dependency_info = _run_brew_json(
                 brew, ["info", "--json=v2", "--cask", *pending_cask_tokens]
             )
@@ -346,6 +362,46 @@ def _load_outdated_info(
         )
 
     return info_by_token
+
+
+def _index_formula_info(
+    info_by_token: dict[str, dict[str, Any]],
+    entry: dict[str, Any],
+) -> None:
+    """Index one formula under every token Homebrew may report for it.
+
+    Assumes dependency metadata can contain stale aliases after a formula rename.
+    Mapping aliases and old names to the canonical payload lets dependency
+    closure expansion converge while preserving one source of package metadata.
+    """
+
+    for token in _formula_identity_tokens(entry):
+        info_by_token[token] = entry
+
+
+def _formula_identity_tokens(entry: dict[str, Any]) -> tuple[str, ...]:
+    """Return canonical and alias tokens for one Homebrew formula payload.
+
+    Assumes `name` is the canonical token and `aliases`/`oldnames` are optional
+    token lists. Keeping insertion order stable makes the canonical name first
+    while removing duplicate aliases defensively.
+    """
+
+    tokens: list[str] = []
+    seen: set[str] = set()
+    values: list[Any] = [entry.get("name")]
+    for key in ("aliases", "oldnames"):
+        aliases = entry.get(key)
+        if isinstance(aliases, str):
+            values.append(aliases)
+        elif isinstance(aliases, list):
+            values.extend(aliases)
+
+    for value in values:
+        if isinstance(value, str) and value and value not in seen:
+            tokens.append(value)
+            seen.add(value)
+    return tuple(tokens)
 
 
 def _build_age_by_token(
